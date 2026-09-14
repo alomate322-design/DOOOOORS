@@ -5,7 +5,7 @@ import { collectDoors } from "./geometry.js";
 import { fmtMod } from "./dice.js";
 import { ICON_KEY, PLAYERS_KEY, loadDC, saveDC, loadLocalRoll, saveLocalRoll } from "./store.js";
 
-let isGM = false, myId = null, players = {}, doors = [];
+let isGM = false, myId = null, players = {}, doors = [], maps = [];
 const $ = (id) => document.getElementById(id);
 const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c;
   if (x !== undefined) n.textContent = x; return n; };
@@ -26,6 +26,14 @@ async function refreshDoors() {
   if (!await OBR.scene.isReady()) { doors = []; return; }
   const items = await OBR.scene.items.getItems();
   doors = collectDoors(items.filter((i) => !i.metadata?.[ICON_KEY]));
+  const gridDpi = 150;
+  maps = items.filter((i) => i.layer === "MAP" && i.image).map((i) => {
+    const dpi = i.grid?.dpi || gridDpi;
+    const w = (i.image.width / dpi) * gridDpi * (i.scale?.x ?? 1);
+    const h = (i.image.height / dpi) * gridDpi * (i.scale?.y ?? 1);
+    return { name: (i.name || "карта").slice(0, 22),
+             x0: i.position.x, y0: i.position.y, x1: i.position.x + w, y1: i.position.y + h };
+  });
 }
 
 function renderPlayers() {
@@ -56,16 +64,45 @@ function renderPlayers() {
   }
 }
 
+function floorOf(d) {
+  // к какой карте относится дверь — по попаданию в её прямоугольник
+  for (const m of maps) {
+    if (d.x >= m.x0 && d.x <= m.x1 && d.y >= m.y0 && d.y <= m.y1) return m.name;
+  }
+  return "—";
+}
+
+async function focusDoor(d) {
+  try {
+    await OBR.viewport.animateTo({
+      position: { x: -d.x + (await OBR.viewport.getWidth()) / 2,
+                  y: -d.y + (await OBR.viewport.getHeight()) / 2 },
+      scale: 1,
+    });
+  } catch {
+    try { await OBR.player.select([`com.cos.doors-${d.id}`]); } catch {}
+  }
+}
+
 function renderDoors() {
-  $("dcount").textContent = String(doors.length);
   const dc = loadDC();
+  const onlyEmpty = $("only-empty").checked;
+  const list = doors.filter((d) => !onlyEmpty || !(dc[d.id]?.pick || dc[d.id]?.force || dc[d.id]?.locked));
+  $("dcount").textContent = `${list.length} из ${doors.length}`;
   const box = $("doors"); box.innerHTML = "";
-  doors.forEach((d, n) => {
+  list.forEach((d) => {
     const cur = dc[d.id] || {};
     const row = el("div", "doorrow");
-    row.appendChild(el("span", "nm", `Дверь ${n + 1}`));
+    const go = el("button", "btn", "▣");
+    go.title = "Показать на карте";
+    go.addEventListener("click", () => focusDoor(d));
+    row.appendChild(go);
+
+    const nm = el("span", "nm", cur.name || `${floorOf(d)} · ${Math.round(d.x)},${Math.round(d.y)}`);
+    row.appendChild(nm);
     if (d.open) row.appendChild(el("span", "tag open", "открыта"));
     if (cur.locked) row.appendChild(el("span", "tag locked", "заперта"));
+
     const lock = document.createElement("input");
     lock.type = "checkbox"; lock.checked = !!cur.locked; lock.title = "Заперта";
     const pick = document.createElement("input");
@@ -74,7 +111,7 @@ function renderDoors() {
     force.type = "number"; force.className = "num"; force.placeholder = "сила"; force.value = cur.force ?? "";
     const save = () => {
       const map = loadDC();
-      map[d.id] = { locked: lock.checked,
+      map[d.id] = { ...(map[d.id] || {}), locked: lock.checked,
         pick: pick.value === "" ? null : Number(pick.value),
         force: force.value === "" ? null : Number(force.value) };
       saveDC(map); renderDoors();
@@ -126,6 +163,7 @@ OBR.onReady(async () => {
 
   if (isGM) {
     renderPlayers(); renderDoors();
+    $("only-empty").addEventListener("change", renderDoors);
     $("btn-sync").addEventListener("click", async () => {
       await refreshDoors(); renderDoors();
       log(`Найдено дверей: ${doors.length}`);

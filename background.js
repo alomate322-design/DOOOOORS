@@ -8,7 +8,7 @@
 // разработчика. Сложности лежат в localStorage мастера, сравнение делает его
 // клиент — игроки видят бросок и исход, но не порог.
 
-import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
+import OBR, { buildImage, isImage } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 import { collectDoors, distance, FOG_DOORS_KEY } from "./geometry.js";
 import { rollD20, describe } from "./dice.js";
 import { ID, ICON_KEY, PLAYERS_KEY, CH_ROLL, CH_RESULT, loadDC, loadLocalRoll } from "./store.js";
@@ -22,46 +22,35 @@ let players = {};
 
 // ---------- иконки ----------
 
-function iconSvg(state) {
-  const color = state === "open" ? "#6bbf82" : state === "locked" ? "#b06058" : "#c9a96e";
-  const body = state === "open"
-    ? `<path d="M7 4h7v16H7z" fill="none" stroke="${color}" stroke-width="2"/>
-       <path d="M14 7l4-2v14l-4-2" fill="none" stroke="${color}" stroke-width="2"/>`
-    : `<rect x="6" y="3" width="12" height="18" rx="1" fill="none" stroke="${color}" stroke-width="2"/>
-       <circle cx="14.5" cy="12" r="1.3" fill="${color}"/>`;
-  const lock = state === "locked"
-    ? `<path d="M9.5 10.5V9a2.5 2.5 0 015 0v1.5" fill="none" stroke="${color}" stroke-width="1.6"/>`
-    : "";
-  return "data:image/svg+xml," + encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-       <rect x="2" y="2" width="20" height="20" rx="4" fill="#14131a" opacity="0.72"/>
-       ${body}${lock}</svg>`);
-}
+// Иконки лежат рядом с расширением обычными файлами: Owlbear грузит картинки
+// по адресу, а data:-ссылки для элементов сцены не годятся.
+const ICON_URL = {
+  closed: new URL("./door-closed.svg", location.href).href,
+  open: new URL("./door-open.svg", location.href).href,
+  locked: new URL("./door-locked.svg", location.href).href,
+};
 
 function stateOf(door, dc) {
   if (door.open) return "open";
   return dc?.[door.id]?.locked ? "locked" : "closed";
 }
 
+// Элемент собираем построителем SDK: вручную собранный объект Owlbear отклоняет.
 function iconItem(door, state) {
-  const size = 75;                  // примерно половина клетки
-  return {
-    id: `${ID}-${door.id}`,
-    type: "IMAGE",
-    name: "Дверь",
-    layer: "PROP",
-    position: { x: door.x, y: door.y },
-    rotation: 0,
-    scale: { x: 1, y: 1 },
-    visible: true,
-    locked: true,                   // чтобы игроки не растащили двери по карте
-    zIndex: 9000000,
-    image: { url: iconSvg(state), width: size, height: size, mime: "image/svg+xml" },
-    grid: { dpi: size, offset: { x: size / 2, y: size / 2 } },
-    text: { type: "PLAIN", plainText: "", richText: [], style: {} },
-    textItemType: "TEXT",
-    metadata: { [ICON_KEY]: { doorId: door.id, itemId: door.itemId, index: door.index } },
-  };
+  const size = 48;
+  const dpi = 96;                    // 48px при dpi 96 = половина клетки
+  return buildImage(
+    { url: ICON_URL[state], width: size, height: size, mime: "image/svg+xml" },
+    { dpi, offset: { x: size / 2, y: size / 2 } },
+  )
+    .id(`${ID}-${door.id}`)
+    .name("Дверь")
+    .layer("PROP")
+    .position({ x: door.x, y: door.y })
+    .locked(true)
+    .visible(true)
+    .metadata({ [ICON_KEY]: { doorId: door.id, itemId: door.itemId, index: door.index } })
+    .build();
 }
 
 export async function syncIcons() {
@@ -79,7 +68,16 @@ export async function syncIcons() {
   const have = new Set(existing.map((i) => i.id));
   const add = doors.filter((d) => !have.has(`${ID}-${d.id}`))
                    .map((d) => iconItem(d, stateOf(d, dc)));
-  if (add.length) await OBR.scene.items.addItems(add);
+  if (add.length) {
+    try {
+      await OBR.scene.items.addItems(add);
+    } catch (err) {
+      // молчаливый провал здесь уже случался — пусть будет видно
+      console.error("[Двери] не удалось добавить иконки", err);
+      OBR.notification.show("Не удалось добавить иконки дверей: " + err.message, "ERROR");
+      throw err;
+    }
+  }
 
   const keep = existing.filter((i) => wanted.has(i.id)).map((i) => i.id);
   if (keep.length) {
@@ -87,7 +85,8 @@ export async function syncIcons() {
       for (const it of list) {
         const d = wanted.get(it.id);
         if (!d) continue;
-        const url = iconSvg(stateOf(d, dc));
+        if (!isImage(it)) continue;
+        const url = ICON_URL[stateOf(d, dc)];
         if (it.image.url !== url) it.image.url = url;
         it.position = { x: d.x, y: d.y };
       }
@@ -203,6 +202,14 @@ async function installMenu() {
   await entry("open", "Открыть", "/icon.svg", "open");
   await entry("pick", "Взлом (Ловкость рук)", "/icon.svg", "pick");
   await entry("force", "Выбить (Сила)", "/icon.svg", "force");
+  if (isGM) {
+    // форма настройки открывается прямо на двери, чтобы не искать её в списке
+    await OBR.contextMenu.create({
+      id: `${ID}/setup`,
+      icons: [{ icon: "/icon.svg", label: "Настроить дверь", filter: HAS_ICON }],
+      embed: { url: "/menu.html", height: 104 },
+    });
+  }
 }
 
 // ---------- запуск ----------
