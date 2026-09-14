@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Двери</title>
+<style>
+  :root{color-scheme:dark;--bg:#14131a;--raised:#1a1922;--line:#2a2833;
+    --text:#e4dfd4;--dim:#8b859a;--accent:#c9a96e;--ok:#6bbf82;--bad:#b06058}
+  *{box-sizing:border-box}
+  [hidden]{display:none !important}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--text);
+    font:13px/1.45 -apple-system,"Segoe UI",system-ui,sans-serif;
+    display:flex;flex-direction:column}
+  header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line)}
+  header h1{font-size:11.5px;margin:0;font-weight:600;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--dim);flex:1}
+  .btn{background:transparent;border:1px solid var(--line);color:var(--dim);
+    border-radius:5px;padding:4px 9px;font-size:11.5px;cursor:pointer}
+  .btn:hover{color:var(--accent);border-color:var(--accent)}
+  .btn.primary{color:var(--accent);border-color:var(--accent)}
+  .btn.danger:hover{color:var(--bad);border-color:var(--bad)}
+  main{flex:1;overflow-y:auto;padding:10px 12px 24px}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);
+    margin:14px 0 6px;font-weight:600}
+  h2:first-child{margin-top:0}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);
+    text-align:left;font-weight:600;padding:4px 6px}
+  td{padding:3px 6px;border-top:1px solid var(--line)}
+  input[type=number],input[type=text]{width:100%;background:var(--raised);color:var(--text);
+    border:1px solid var(--line);border-radius:4px;padding:4px 6px;font-size:12.5px}
+  input[type=number]{width:62px}
+  .num{width:62px}
+  .hint{font-size:11.5px;color:var(--dim);margin:6px 0}
+  .doorrow{display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--line)}
+  .doorrow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{font-size:10.5px;border:1px solid var(--line);border-radius:999px;padding:1px 7px;color:var(--dim)}
+  .tag.locked{color:var(--bad);border-color:var(--bad)}
+  .tag.open{color:var(--ok);border-color:var(--ok)}
+  .bulk{display:flex;gap:6px;align-items:center;margin:8px 0}
+  label.chk{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--dim)}
+  #log{border-top:1px solid var(--line);background:var(--raised);max-height:120px;
+    overflow-y:auto;padding:6px 12px;font-size:12px}
+  .logrow{padding:2px 0;border-bottom:1px solid #221f2b}
+  .logrow:last-child{border-bottom:none}
+  .logrow b{color:var(--accent)}
+  .logrow.ok b{color:var(--ok)}
+  .logrow.fail b{color:var(--bad)}
+</style>
+</head>
+<body>
+  <header>
+    <h1 id="title">Двери</h1>
+    <button id="btn-sync" class="btn" hidden>Обновить иконки</button>
+    <button id="btn-clear" class="btn danger" hidden>Убрать иконки</button>
+  </header>
+
+  <main>
+    <!-- панель мастера -->
+    <section id="gm" hidden>
+      <h2>Показатели игроков</h2>
+      <div class="hint">Заполняется заранее. Модификаторы видны игрокам, сложности дверей — нет.</div>
+      <table id="players">
+        <thead><tr><th>Игрок</th><th>Сила</th><th>Ловкость рук</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="bulk">
+        <input id="new-name" type="text" placeholder="Имя персонажа" />
+        <button id="btn-add" class="btn">Добавить</button>
+      </div>
+
+      <h2>Двери сцены (<span id="dcount">0</span>)</h2>
+      <div class="bulk">
+        <span class="hint" style="flex:1">Проставить всем незапертым:</span>
+        <input id="bulk-dc" class="num" type="number" placeholder="Сл" />
+        <button id="btn-bulk" class="btn">Применить</button>
+      </div>
+      <div id="doors"></div>
+    </section>
+
+    <!-- панель игрока -->
+    <section id="pl" hidden>
+      <h2>Твои модификаторы</h2>
+      <div id="mymods" class="hint">Мастер ещё не задал твои показатели.</div>
+      <h2>Ситуативный плюс</h2>
+      <div class="hint">Учитывает вдохновение, помощь союзника и прочее. Применяется к следующему броску.</div>
+      <div class="bulk">
+        <input id="bonus" class="num" type="number" value="0" />
+        <label class="chk"><input id="adv" type="checkbox" /> преимущество</label>
+        <label class="chk"><input id="dis" type="checkbox" /> помеха</label>
+      </div>
+      <h2>Как открыть дверь</h2>
+      <div class="hint">Выдели свой токен, подойди к двери и кликни по её иконке —
+        в меню появятся «Открыть», «Взлом» и «Выбить».</div>
+    </section>
+  </main>
+
+  <div id="log"></div>
+  <script type="module" src="./app.js?v=1"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+    "name": "Двери",
+    "version": "1.0.0",
+    "manifest_version": 1,
+    "description": "Двери Dynamic Fog: иконки для игроков, взлом и выбивание с броском",
+    "icon": "/icon.svg",
+    "author": "Никита",
+    "background_url": "/background.html",
+    "action": {
+        "title": "Двери",
+        "icon": "/icon.svg",
+        "popover": "/index.html",
+        "width": 420,
+        "height": 620
+    }
+}
