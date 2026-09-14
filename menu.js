@@ -2,7 +2,7 @@
 // Так не нужно искать нужную строку в списке — кликнул по двери и задал Сл.
 
 import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
-import { ICON_KEY, loadDC, saveDC } from "./store.js";
+import { ICON_KEY, loadDC, saveDC, num } from "./store.js";
 
 const $ = (id) => document.getElementById(id);
 let doorId = null;
@@ -30,8 +30,8 @@ OBR.onReady(async () => {
     m[doorId] = {
       name: $("name").value.trim(),
       locked: $("locked").checked,
-      pick: $("pick").value === "" ? null : Number($("pick").value),
-      force: $("force").value === "" ? null : Number($("force").value),
+      pick: $("pick").value === "" ? null : num($("pick").value),
+      force: $("force").value === "" ? null : num($("force").value),
     };
     saveDC(m);
     $("status").textContent = "Сохранено. Иконка обновится сразу.";

@@ -40,3 +40,25 @@ export function loadLocalRoll() {
 export function saveLocalRoll(bonus, mode) {
   try { localStorage.setItem(LS_ROLL, JSON.stringify({ bonus, mode })); } catch {}
 }
+
+// Разбор числа из поля ввода. Именно здесь раньше терялись минусы и пустые
+// значения: "" и "-" должны давать 0, а "-2" — минус два.
+export function num(v) {
+  if (v === null || v === undefined) return 0;
+  const n = parseFloat(String(v).replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Модификаторы игрока. Ищем по идентификатору, а если мастер завёл запись
+// вручную по имени — то и по имени: иначе показатели молча считались нулём.
+export function modsFor(players, playerId, playerName) {
+  const byId = players?.[playerId];
+  if (byId) return { str: num(byId.str), sleight: num(byId.sleight), found: true };
+  const name = String(playerName || "").trim().toLowerCase();
+  for (const p of Object.values(players || {})) {
+    if (String(p.name || "").trim().toLowerCase() === name && name) {
+      return { str: num(p.str), sleight: num(p.sleight), found: true };
+    }
+  }
+  return { str: 0, sleight: 0, found: false };
+}

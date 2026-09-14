@@ -11,9 +11,8 @@
 import OBR, { buildImage, isImage } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 import { collectDoors, distance, FOG_DOORS_KEY } from "./geometry.js";
 import { rollD20, describe } from "./dice.js";
-import { playUnlock, playFail, playClose, playRoll } from "./sfx.js";
 import { ID, ICON_KEY, PLAYERS_KEY, ATTEMPTS_KEY, CH_ROLL, CH_RESULT,
-         loadDC, saveDC, loadLocalRoll, MAX_TRIES } from "./store.js";
+         loadDC, saveDC, loadLocalRoll, MAX_TRIES, modsFor } from "./store.js";
 
 const REACH = 320;                 // около двух клеток по 150 единиц
 
@@ -22,6 +21,9 @@ let myId = null;
 let doors = [];
 let players = {};
 let lastToken = null;      // последний выделенный токен, не считая дверей
+let fogSignature = "";     // отпечаток дверей: пересчитываем, только когда он изменился
+let syncTimer = null;
+let syncPending = null;
 let attempts = {};         // попытки: {doorId: {playerId: {pick, force}}}, room metadata
 
 // ---------- иконки ----------
@@ -59,8 +61,35 @@ function iconItem(door, state) {
     .build();
 }
 
-export async function syncIcons() {
+// Отпечаток дверей: id куска тумана, число дверей и их состояние. Пока он тот
+// же, геометрию пересчитывать незачем — а она считалась на каждое движение
+// любого токена на карте.
+function hash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return h;
+}
+
+function signatureOf(items) {
+  // В отпечаток входят и настройки дверей: иначе смена «заперта» или Сл не
+  // перерисовывала иконку — отпечаток тумана-то прежний.
+  let sig = isGM ? "dc" + hash(JSON.stringify(loadDC())) + "|" : "";
+  for (const i of items) {
+    const d = i.metadata?.[FOG_DOORS_KEY];
+    if (!Array.isArray(d) || !d.length) continue;
+    sig += i.id + ":" + d.length + ":";
+    for (const x of d) sig += x.open ? "1" : "0";
+    sig += "|";
+  }
+  return sig;
+}
+
+export async function syncIcons(force = false) {
   const items = await OBR.scene.items.getItems();
+  const sig = signatureOf(items);
+  const changed = sig !== fogSignature;
+  if (!changed && !force && doors.length) return doors;
+  fogSignature = sig;
   doors = collectDoors(items.filter((i) => !i.metadata?.[ICON_KEY]));
   if (!isGM) return doors;          // добавлять элементы может только мастер
 
@@ -85,20 +114,38 @@ export async function syncIcons() {
     }
   }
 
-  const keep = existing.filter((i) => wanted.has(i.id)).map((i) => i.id);
-  if (keep.length) {
-    await OBR.scene.items.updateItems(keep, (list) => {
+  // Правим только те иконки, у которых действительно поменялись картинка или
+  // место. Раньше переписывались все 50 на каждый чих, и каждая правка — это
+  // сетевое сообщение всем участникам.
+  const dirty = [];
+  for (const it of existing) {
+    const d = wanted.get(it.id);
+    if (!d) continue;
+    const url = ICON_URL[stateOf(d, dc)];
+    const moved = Math.abs(it.position.x - d.x) > 0.5 || Math.abs(it.position.y - d.y) > 0.5;
+    if (it.image?.url !== url || moved) dirty.push(it.id);
+  }
+  if (dirty.length) {
+    const byId = new Map(dirty.map((id) => [id, wanted.get(id)]));
+    await OBR.scene.items.updateItems(dirty, (list) => {
       for (const it of list) {
-        const d = wanted.get(it.id);
-        if (!d) continue;
-        if (!isImage(it)) continue;
-        const url = ICON_URL[stateOf(d, dc)];
-        if (it.image.url !== url) it.image.url = url;
+        const d = byId.get(it.id);
+        if (!d || !isImage(it)) continue;
+        it.image.url = ICON_URL[stateOf(d, dc)];
         it.position = { x: d.x, y: d.y };
       }
     });
   }
   return doors;
+}
+
+// Схлопываем частые события сцены в один пересчёт.
+function scheduleSync(delay = 250) {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    syncTimer = null;
+    syncPending = syncIcons().catch(() => {});
+  }, delay);
 }
 
 export async function clearIcons() {
@@ -110,19 +157,20 @@ export async function clearIcons() {
 
 // ---------- действия игрока ----------
 
-async function doorFromElement(elementId) {
-  const items = await OBR.scene.items.getItems([elementId]);
-  const meta = items[0]?.metadata?.[ICON_KEY];
+function doorFromItems(elementId, items) {
+  const meta = items.find((i) => i.id === elementId)?.metadata?.[ICON_KEY];
   if (!meta) return null;
-  if (!doors.length) await syncIcons();
   return doors.find((d) => d.id === meta.doorId) || null;
 }
 
 // Кто действует. На выделение полагаться нельзя: правый клик по двери сам её
 // выделяет, и к моменту обработки в выделении лежит дверь, а не токен. Поэтому
 // берём последний выделенный токен, а если его нет — ближайшего персонажа у двери.
-async function actingToken(door) {
-  const items = await OBR.scene.items.getItems();
+// Кто действует. На выделение полагаться нельзя: правый клик по двери сам её
+// выделяет, и к моменту обработки в выделении лежит дверь, а не токен. Поэтому
+// берём последний выделенный токен, а если его нет — ближайшего персонажа у двери.
+// items передаём снаружи: раньше на одну попытку делалось два обхода сцены.
+function actingToken(door, items) {
   const isIcon = (i) => !!i.metadata?.[ICON_KEY];
 
   if (lastToken) {
@@ -130,18 +178,22 @@ async function actingToken(door) {
     if (tok) return { token: tok };
   }
 
-  const near = items
-    .filter((i) => i.layer === "CHARACTER" && !isIcon(i))
-    .map((i) => ({ i, d: distance(i.position, door) }))
-    .filter((x) => x.d <= REACH)
-    .sort((a, b) => a.d - b.d);
-
-  if (near.length) return { token: near[0].i, guessed: true };
+  let best = null;
+  let bestDist = Infinity;
+  for (const i of items) {
+    if (i.layer !== "CHARACTER" || isIcon(i)) continue;
+    const d = distance(i.position, door);
+    if (d <= REACH && d < bestDist) { best = i; bestDist = d; }
+  }
+  if (best) return { token: best, guessed: true };
   return { error: "Рядом с дверью нет твоего токена. Выдели его и подойди ближе." };
 }
 
 async function attempt(elementId, kind) {
-  const door = await doorFromElement(elementId);
+  if (syncPending) await syncPending;           // не работаем по устаревшему кэшу
+  const items = await OBR.scene.items.getItems();
+  if (!doors.length) await syncIcons(true);
+  const door = doorFromItems(elementId, items);
   if (!door) return;
   // «уже открыта» касается только открывания: закрывать открытую дверь как раз и надо
   if (kind === "close" && !door.open) {
@@ -151,7 +203,7 @@ async function attempt(elementId, kind) {
     return OBR.notification.show("Дверь уже открыта.", "DEFAULT");
   }
 
-  const { token, error } = await actingToken(door);
+  const { token, error } = actingToken(door, items);
   if (error) return OBR.notification.show(error, "WARNING");
   if (distance(token.position, door) > REACH) {
     return OBR.notification.show("Слишком далеко от двери.", "WARNING");
@@ -171,15 +223,21 @@ async function attempt(elementId, kind) {
                       : "Выбить не получается — силы кончились.", "WARNING");
   }
 
-  const mods = players[myId] || {};
+  const mods = modsFor(players, myId, name);
+  if (!mods.found) {
+    OBR.notification.show(
+      "Мастер не задал твои показатели — бросок идёт без модификатора.", "WARNING");
+  }
   const { bonus, mode } = loadLocalRoll();
-  const mod = Number(kind === "pick" ? mods.sleight ?? 0 : mods.str ?? 0) + bonus;
-  playRoll();
+  const mod = (kind === "pick" ? mods.sleight : mods.str) + bonus;
   const r = rollD20(mod, mode);
+  const label = kind === "pick" ? "взлом замка" : "выбить дверь";
+  // показываем свой бросок немедленно: ждать возврата рассылки — лишняя задержка
+  OBR.notification.show(`🎲 ${name} — ${label}: ${describe(r)}`, "DEFAULT");
   await OBR.broadcast.sendMessage(CH_ROLL, {
     ...base,
     total: r.total, detail: describe(r), crit: r.crit, fumble: r.fumble,
-    label: kind === "pick" ? "взлом замка" : "выбить дверь",
+    label,
   }, { destination: "ALL" });
 }
 
@@ -192,7 +250,15 @@ async function setOpen(door, open) {
       if (Array.isArray(list) && list[door.index]) list[door.index].open = open;
     }
   });
-  await syncIcons();
+  door.open = open;
+  // меняем только одну иконку вместо полного пересчёта сцены
+  const dc = loadDC();
+  try {
+    await OBR.scene.items.updateItems([`${ID}-${door.id}`], (list) => {
+      for (const it of list) if (isImage(it)) it.image.url = ICON_URL[stateOf(door, dc)];
+    });
+  } catch {}
+  fogSignature = "";                // отпечаток устарел
 }
 
 // Рассылаем всем один раз: раньше мастер показывал уведомление и локально,
@@ -292,16 +358,12 @@ OBR.onReady(async () => {
     const { text, kind } = e.data;
     OBR.notification.show(text,
       kind === "ok" ? "SUCCESS" : kind === "close" ? "DEFAULT" : "WARNING");
-    if (kind === "ok") playUnlock();
-    else if (kind === "close") playClose();
-    else playFail();
   });
   OBR.broadcast.onMessage(CH_ROLL, (e) => {
     const m = e.data;
-    if (m.detail) {
-      // бросок видят все, включая самого бросавшего
+    // свой бросок уже показан локально — здесь только чужие
+    if (m.detail && m.playerId !== myId) {
       OBR.notification.show(`🎲 ${m.name} — ${m.label}: ${m.detail}`, "DEFAULT");
-      if (m.playerId !== myId) playRoll();
     }
     if (isGM) judge(m);
   });
@@ -318,19 +380,13 @@ OBR.onReady(async () => {
 
   await installMenu();
 
-  if (isGM) {
-    if (await OBR.scene.isReady()) await syncIcons();
-    OBR.scene.onReadyChange(async (ready) => { if (ready) await syncIcons(); });
-    // двери могли открыть/закрыть в самом Dynamic Fog — держим иконки в курсе
-    let t = null;
-    OBR.scene.items.onChange(() => {
-      clearTimeout(t);
-      t = setTimeout(() => syncIcons().catch(() => {}), 400);
-    });
-  } else {
-    if (await OBR.scene.isReady()) await syncIcons();
-    OBR.scene.items.onChange(() => { syncIcons().catch(() => {}); });
-  }
+  if (await OBR.scene.isReady()) await syncIcons(true);
+  OBR.scene.onReadyChange(async (ready) => {
+    if (ready) { fogSignature = ""; await syncIcons(true); }
+  });
+  // Двери могли открыть в самом Dynamic Fog. Реагируем с задержкой и только на
+  // настоящие изменения: раньше у игроков это срабатывало на каждый сдвиг токена.
+  OBR.scene.items.onChange(() => scheduleSync(isGM ? 300 : 500));
 
   window.__doors = { syncIcons, clearIcons, getDoors: () => doors };
 });

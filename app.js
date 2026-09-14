@@ -3,7 +3,8 @@
 import OBR from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 import { collectDoors } from "./geometry.js";
 import { fmtMod } from "./dice.js";
-import { ICON_KEY, PLAYERS_KEY, loadDC, saveDC, loadLocalRoll, saveLocalRoll } from "./store.js";
+import { ICON_KEY, PLAYERS_KEY, loadDC, saveDC, loadLocalRoll, saveLocalRoll,
+         num, modsFor } from "./store.js";
 
 let isGM = false, myId = null, players = {}, doors = [], maps = [];
 const $ = (id) => document.getElementById(id);
@@ -45,9 +46,10 @@ function renderPlayers() {
     for (const field of ["str", "sleight"]) {
       const td = document.createElement("td");
       const inp = document.createElement("input");
-      inp.type = "number"; inp.className = "num"; inp.value = p[field] ?? 0;
+      inp.type = "number"; inp.className = "num"; inp.step = "1";
+      inp.value = p[field] ?? 0;
       inp.addEventListener("change", async () => {
-        players[pid][field] = Number(inp.value || 0);
+        players[pid][field] = num(inp.value);
         await OBR.room.setMetadata({ [PLAYERS_KEY]: players });
       });
       td.appendChild(inp); tr.appendChild(td);
@@ -112,8 +114,8 @@ function renderDoors() {
     const save = () => {
       const map = loadDC();
       map[d.id] = { ...(map[d.id] || {}), locked: lock.checked,
-        pick: pick.value === "" ? null : Number(pick.value),
-        force: force.value === "" ? null : Number(force.value) };
+        pick: pick.value === "" ? null : num(pick.value),
+        force: force.value === "" ? null : num(force.value) };
       saveDC(map); renderDoors();
     };
     [lock, pick, force].forEach((i) => i.addEventListener("change", save));
@@ -122,10 +124,11 @@ function renderDoors() {
   });
 }
 
-function renderPlayerPanel() {
-  const p = players[myId];
-  $("mymods").textContent = p
-    ? `Сила ${fmtMod(Number(p.str || 0))}, Ловкость рук ${fmtMod(Number(p.sleight || 0))}`
+async function renderPlayerPanel() {
+  const myName = await OBR.player.getName();
+  const m = modsFor(players, myId, myName);
+  $("mymods").textContent = m.found
+    ? `Сила ${fmtMod(m.str)}, Ловкость рук ${fmtMod(m.sleight)}`
     : "Мастер ещё не задал твои показатели.";
   const { bonus, mode } = loadLocalRoll();
   $("bonus").value = bonus;
@@ -138,7 +141,7 @@ function wirePlayerInputs() {
     const mode = $("adv").checked ? "adv" : $("dis").checked ? "dis" : "normal";
     if (mode === "adv") $("dis").checked = false;
     if (mode === "dis") $("adv").checked = false;
-    saveLocalRoll(Number($("bonus").value || 0), mode);
+    saveLocalRoll(num($("bonus").value), mode);
   };
   ["bonus", "adv", "dis"].forEach((id) => $(id).addEventListener("change", save));
 }
@@ -184,7 +187,7 @@ OBR.onReady(async () => {
       $("new-name").value = ""; renderPlayers();
     });
     $("btn-bulk").addEventListener("click", () => {
-      const v = Number($("bulk-dc").value || 0);
+      const v = num($("bulk-dc").value);
       if (!v) return;
       const map = loadDC();
       for (const d of doors) {
