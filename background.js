@@ -11,7 +11,9 @@
 import OBR, { buildImage, isImage } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 import { collectDoors, distance, FOG_DOORS_KEY } from "./geometry.js";
 import { rollD20, describe } from "./dice.js";
-import { ID, ICON_KEY, PLAYERS_KEY, CH_ROLL, CH_RESULT, loadDC, loadLocalRoll } from "./store.js";
+import { playUnlock, playFail, playClose, playRoll } from "./sfx.js";
+import { ID, ICON_KEY, PLAYERS_KEY, ATTEMPTS_KEY, CH_ROLL, CH_RESULT,
+         loadDC, saveDC, loadLocalRoll, MAX_TRIES } from "./store.js";
 
 const REACH = 320;                 // около двух клеток по 150 единиц
 
@@ -20,6 +22,7 @@ let myId = null;
 let doors = [];
 let players = {};
 let lastToken = null;      // последний выделенный токен, не считая дверей
+let attempts = {};         // попытки: {doorId: {playerId: {pick, force}}}, room metadata
 
 // ---------- иконки ----------
 
@@ -33,7 +36,9 @@ const ICON_URL = {
 
 function stateOf(door, dc) {
   if (door.open) return "open";
-  return dc?.[door.id]?.locked ? "locked" : "closed";
+  const d = dc?.[door.id];
+  // если замок уже сломали, дверь дальше просто закрыта
+  return d?.locked && !d.broken ? "locked" : "closed";
 }
 
 // Элемент собираем построителем SDK: вручную собранный объект Owlbear отклоняет.
@@ -138,7 +143,13 @@ async function actingToken(door) {
 async function attempt(elementId, kind) {
   const door = await doorFromElement(elementId);
   if (!door) return;
-  if (door.open) return OBR.notification.show("Дверь уже открыта.", "DEFAULT");
+  // «уже открыта» касается только открывания: закрывать открытую дверь как раз и надо
+  if (kind === "close" && !door.open) {
+    return OBR.notification.show("Дверь и так закрыта.", "DEFAULT");
+  }
+  if (kind !== "close" && door.open) {
+    return OBR.notification.show("Дверь уже открыта.", "DEFAULT");
+  }
 
   const { token, error } = await actingToken(door);
   if (error) return OBR.notification.show(error, "WARNING");
@@ -149,13 +160,21 @@ async function attempt(elementId, kind) {
   const name = (await OBR.player.getName()) || "Игрок";
   const base = { doorId: door.id, kind, name, playerId: myId };
 
-  if (kind === "open") {
+  if (kind === "open" || kind === "close") {
     return OBR.broadcast.sendMessage(CH_ROLL, base, { destination: "ALL" });
+  }
+
+  const used = attempts?.[door.id]?.[myId]?.[kind] || 0;
+  if (used >= MAX_TRIES) {
+    return OBR.notification.show(
+      kind === "pick" ? "Взломать больше не выходит — попытки кончились."
+                      : "Выбить не получается — силы кончились.", "WARNING");
   }
 
   const mods = players[myId] || {};
   const { bonus, mode } = loadLocalRoll();
   const mod = Number(kind === "pick" ? mods.sleight ?? 0 : mods.str ?? 0) + bonus;
+  playRoll();
   const r = rollD20(mod, mode);
   await OBR.broadcast.sendMessage(CH_ROLL, {
     ...base,
@@ -176,30 +195,59 @@ async function setOpen(door, open) {
   await syncIcons();
 }
 
+// Рассылаем всем один раз: раньше мастер показывал уведомление и локально,
+// и через рассылку, отчего оно двоилось.
 async function announce(text, kind) {
   await OBR.broadcast.sendMessage(CH_RESULT, { text, kind }, { destination: "ALL" });
-  OBR.notification.show(text, kind === "ok" ? "SUCCESS" : "WARNING");
+}
+
+async function bumpAttempt(doorId, playerId, kind) {
+  const next = { ...attempts };
+  const perDoor = { ...(next[doorId] || {}) };
+  const perPlayer = { ...(perDoor[playerId] || {}) };
+  perPlayer[kind] = (perPlayer[kind] || 0) + 1;
+  perDoor[playerId] = perPlayer;
+  next[doorId] = perDoor;
+  attempts = next;
+  await OBR.room.setMetadata({ [ATTEMPTS_KEY]: next });
+  return perPlayer[kind];
 }
 
 async function judge(msg) {
   if (!doors.length) await syncIcons();
   const door = doors.find((d) => d.id === msg.doorId);
   if (!door) return;
-  const dc = loadDC()[msg.doorId] || {};
+  const map = loadDC();
+  const dc = map[msg.doorId] || {};
+
+  if (msg.kind === "close") {
+    if (!door.open) return;
+    await setOpen(door, false);
+    return announce(`${msg.name}: дверь закрыта.`, "close");
+  }
 
   if (msg.kind === "open") {
-    if (dc.locked) return announce(`${msg.name}: заперто.`, "fail");
+    // замок, который уже сломали, больше не мешает
+    if (dc.locked && !dc.broken) return announce(`${msg.name}: заперто.`, "fail");
     await setOpen(door, true);
     return announce(`${msg.name}: дверь открыта.`, "ok");
   }
 
+  const used = await bumpAttempt(msg.doorId, msg.playerId, msg.kind);
   const target = Number(msg.kind === "pick" ? dc.pick ?? 15 : dc.force ?? 15);
   const ok = msg.crit || (!msg.fumble && msg.total >= target);
+  const left = Math.max(0, MAX_TRIES - used);
+
   if (ok) {
+    // дверь больше не заперта: дальше открывается и закрывается свободно
+    map[msg.doorId] = { ...dc, broken: true };
+    saveDC(map);
     await setOpen(door, true);
-    return announce(`${msg.total} — дверь распахнулась.`, "ok");
+    const how = msg.kind === "pick" ? "замок поддался" : "дверь выбита";
+    return announce(`${msg.name}: ${msg.total} — ${how}!`, "ok");
   }
-  return announce(`${msg.total} — не удалось.`, "fail");
+  const tail = left ? ` Осталось попыток: ${left}.` : " Попытки кончились.";
+  return announce(`${msg.name}: ${msg.total} — не удалось.${tail}`, "fail");
 }
 
 // ---------- меню на иконке ----------
@@ -213,6 +261,7 @@ async function installMenu() {
     onClick: (ctx) => attempt(ctx.items[0].id, kind),
   });
   await entry("open", "Открыть", "/icon.svg", "open");
+  await entry("close", "Закрыть", "/icon.svg", "close");
   await entry("pick", "Взлом (Ловкость рук)", "/icon.svg", "pick");
   await entry("force", "Выбить (Сила)", "/icon.svg", "force");
   if (isGM) {
@@ -233,15 +282,26 @@ OBR.onReady(async () => {
 
   const meta = await OBR.room.getMetadata();
   players = meta[PLAYERS_KEY] || {};
-  OBR.room.onMetadataChange((m) => { players = m[PLAYERS_KEY] || {}; });
+  attempts = meta[ATTEMPTS_KEY] || {};
+  OBR.room.onMetadataChange((m) => {
+    players = m[PLAYERS_KEY] || {};
+    attempts = m[ATTEMPTS_KEY] || {};
+  });
 
   OBR.broadcast.onMessage(CH_RESULT, (e) => {
-    OBR.notification.show(e.data.text, e.data.kind === "ok" ? "SUCCESS" : "WARNING");
+    const { text, kind } = e.data;
+    OBR.notification.show(text,
+      kind === "ok" ? "SUCCESS" : kind === "close" ? "DEFAULT" : "WARNING");
+    if (kind === "ok") playUnlock();
+    else if (kind === "close") playClose();
+    else playFail();
   });
   OBR.broadcast.onMessage(CH_ROLL, (e) => {
     const m = e.data;
-    if (m.detail && m.playerId !== myId) {
-      OBR.notification.show(`${m.name}: ${m.label} — ${m.total}`, "DEFAULT");
+    if (m.detail) {
+      // бросок видят все, включая самого бросавшего
+      OBR.notification.show(`🎲 ${m.name} — ${m.label}: ${m.detail}`, "DEFAULT");
+      if (m.playerId !== myId) playRoll();
     }
     if (isGM) judge(m);
   });

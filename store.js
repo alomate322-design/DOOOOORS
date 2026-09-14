@@ -7,6 +7,10 @@
 export const ID = "com.cos.doors";
 export const ICON_KEY = `${ID}/icon`;
 export const PLAYERS_KEY = `${ID}/players`;   // модификаторы игроков, room metadata
+export const ATTEMPTS_KEY = `${ID}/attempts`; // израсходованные попытки, room metadata
+
+// Сколько раз один игрок может пробовать одну дверь каждым способом.
+export const MAX_TRIES = 3;
 export const CH_ROLL = `${ID}/roll`;          // бросок игрока -> всем
 export const CH_RESULT = `${ID}/result`;      // вердикт мастера -> всем
 
