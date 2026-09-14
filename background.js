@@ -19,6 +19,7 @@ let isGM = false;
 let myId = null;
 let doors = [];
 let players = {};
+let lastToken = null;      // последний выделенный токен, не считая дверей
 
 // ---------- иконки ----------
 
@@ -112,14 +113,26 @@ async function doorFromElement(elementId) {
   return doors.find((d) => d.id === meta.doorId) || null;
 }
 
-async function actingToken() {
-  const sel = await OBR.player.getSelection();
-  if (!sel || sel.length !== 1) return { error: "Выдели один свой токен и попробуй снова." };
-  const items = await OBR.scene.items.getItems(sel);
-  const tok = items[0];
-  if (!tok) return { error: "Не нашёл выделенный токен." };
-  if (tok.metadata?.[ICON_KEY]) return { error: "Выдели токен персонажа, а не дверь." };
-  return { token: tok };
+// Кто действует. На выделение полагаться нельзя: правый клик по двери сам её
+// выделяет, и к моменту обработки в выделении лежит дверь, а не токен. Поэтому
+// берём последний выделенный токен, а если его нет — ближайшего персонажа у двери.
+async function actingToken(door) {
+  const items = await OBR.scene.items.getItems();
+  const isIcon = (i) => !!i.metadata?.[ICON_KEY];
+
+  if (lastToken) {
+    const tok = items.find((i) => i.id === lastToken && !isIcon(i));
+    if (tok) return { token: tok };
+  }
+
+  const near = items
+    .filter((i) => i.layer === "CHARACTER" && !isIcon(i))
+    .map((i) => ({ i, d: distance(i.position, door) }))
+    .filter((x) => x.d <= REACH)
+    .sort((a, b) => a.d - b.d);
+
+  if (near.length) return { token: near[0].i, guessed: true };
+  return { error: "Рядом с дверью нет твоего токена. Выдели его и подойди ближе." };
 }
 
 async function attempt(elementId, kind) {
@@ -127,7 +140,7 @@ async function attempt(elementId, kind) {
   if (!door) return;
   if (door.open) return OBR.notification.show("Дверь уже открыта.", "DEFAULT");
 
-  const { token, error } = await actingToken();
+  const { token, error } = await actingToken(door);
   if (error) return OBR.notification.show(error, "WARNING");
   if (distance(token.position, door) > REACH) {
     return OBR.notification.show("Слишком далеко от двери.", "WARNING");
@@ -231,6 +244,16 @@ OBR.onReady(async () => {
       OBR.notification.show(`${m.name}: ${m.label} — ${m.total}`, "DEFAULT");
     }
     if (isGM) judge(m);
+  });
+
+  // следим за выделением, чтобы знать, каким токеном игрок действует
+  OBR.player.onChange(async (p) => {
+    const sel = p?.selection;
+    if (!sel || sel.length !== 1) return;
+    try {
+      const [it] = await OBR.scene.items.getItems(sel);
+      if (it && !it.metadata?.[ICON_KEY]) lastToken = it.id;
+    } catch {}
   });
 
   await installMenu();
